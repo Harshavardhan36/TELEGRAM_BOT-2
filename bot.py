@@ -1,11 +1,16 @@
+
 import os
+print("==== ENV DEBUG START ====")
+print("BOT_TOKEN =", os.getenv("BOT_TOKEN"))
+print("ALL ENV KEYS =", list(os.environ.keys()))
+print("==== ENV DEBUG END ====")
+
 import asyncio
 import requests
 from datetime import datetime, timedelta
 from telegram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ---------------- CONFIG ---------------- #
 # ---------------- CONFIG ---------------- #
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")
