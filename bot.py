@@ -1,21 +1,18 @@
 import os
-import re
+import csv
 import asyncio
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-
-# ================== CONFIG ================== #
+# ================= CONFIG ================= #
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")
-
-ADZUNA_APP_ID = os.getenv("ADZUNA_APP_ID")
-ADZUNA_APP_KEY = os.getenv("ADZUNA_APP_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
+CSV_FILE = "top_500_h1b_companies_ats_fallbacks.csv"
 CHECK_INTERVAL_MINUTES = 5
 POSTED_FILE = "posted_jobs.txt"
 
@@ -23,16 +20,25 @@ if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN is not set")
 if not GROUP_CHAT_ID:
     raise RuntimeError("❌ GROUP_CHAT_ID is not set")
-if not ADZUNA_APP_ID or not ADZUNA_APP_KEY:
-    raise RuntimeError("❌ Adzuna API keys are not set")
 if not SERPAPI_KEY:
     raise RuntimeError("❌ SERPAPI_KEY is not set")
 
 GROUP_CHAT_ID = int(GROUP_CHAT_ID)
 bot = Bot(token=BOT_TOKEN)
 
+# ================= ROLES ================= #
 
-# ================== HELPERS ================== #
+ROLE_QUERY = (
+    '"Data Analyst" OR "Senior Data Analyst" OR "Business Analyst" OR '
+    '"Business Intelligence Analyst" OR "BI Analyst" OR '
+    '"Data Scientist" OR "Data Engineer" OR "Analytics Engineer" OR '
+    '"Product Analyst" OR "Marketing Analyst" OR '
+    '"Risk Analyst" OR "Quantitative Analyst" OR '
+    '"Operations Analyst" OR "Supply Chain Analyst" OR '
+    '"Quality Analyst" OR "Tableau Developer" OR "Power BI Developer"'
+)
+
+# ================= HELPERS ================= #
 
 def load_posted_jobs():
     try:
@@ -41,77 +47,95 @@ def load_posted_jobs():
     except FileNotFoundError:
         return set()
 
-
 def save_posted_job(job_id):
     with open(POSTED_FILE, "a") as f:
         f.write(job_id + "\n")
 
+def load_companies():
+    companies = []
+    with open(CSV_FILE, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            sites = [s.strip() for s in row["career_sites"].split("|") if s.strip()]
+            companies.append({
+                "company": row["company"],
+                "sites": sites
+            })
+    print(f"✅ Loaded {len(companies)} companies from CSV")
+    return companies
 
-# ================== INFERENCE ================== #
+def is_within_24_hours(posted_at: str) -> bool:
+    if not posted_at:
+        return False
 
-def extract_experience(text):
-    if not text:
-        return None
-    text = text.lower()
+    posted_at = posted_at.lower()
 
-    patterns = [
-        r'(\d+)\s*[-–to]+\s*(\d+)\s*years',
-        r'(\d+)\+?\s*years',
-        r'at least\s+(\d+)\s+years',
-    ]
+    if "minute" in posted_at:
+        return True
 
-    for p in patterns:
-        m = re.search(p, text)
-        if m:
-            return m.group(0) + " (estimated)"
+    if "hour" in posted_at:
+        try:
+            hours = int(posted_at.split()[0])
+            return hours <= 24
+        except:
+            return False
 
-    if "senior" in text:
-        return "5+ years (estimated)"
-    if "junior" in text or "entry level" in text:
-        return "0–2 years (estimated)"
+    if "day" in posted_at:
+        return posted_at.startswith("1 day")
 
-    return None
+    return False
 
+# ================= SERPAPI FETCH ================= #
 
-def extract_salary(text):
-    if not text:
-        return None
+def fetch_company_jobs(company, site):
+    url = "https://serpapi.com/search.json"
+    params = {
+        "engine": "google_jobs",
+        "q": f'site:{site} ({ROLE_QUERY})',
+        "hl": "en",
+        "api_key": SERPAPI_KEY,
+        "tbs": "qdr:d"
+    }
 
-    m = re.search(r'\$\d{2,3}k\s*[-–to]+\s*\$\d{2,3}k', text, re.IGNORECASE)
-    if m:
-        return m.group(0)
+    try:
+        res = requests.get(url, params=params, timeout=20).json()
+    except Exception:
+        return []
 
-    m = re.search(r'\$\d{4,6}', text)
-    if m:
-        return m.group(0)
+    jobs = []
 
-    return None
+    for j in res.get("jobs_results", []):
+        posted_at = j.get("detected_extensions", {}).get("posted_at")
+        if not is_within_24_hours(posted_at):
+            continue
 
+        apply_opts = j.get("apply_options", [])
+        if not apply_opts:
+            continue
 
-def detect_h1b(text):
-    if not text:
-        return "Not mentioned"
+        jobs.append({
+            "id": j.get("job_id") or f"{company}-{j['title']}",
+            "title": j["title"],
+            "company": company,
+            "location": j.get("location", "United States"),
+            "summary": j.get("description", ""),
+            "url": apply_opts[0].get("link"),
+            "source": site,
+            "posted": posted_at
+        })
 
-    text = text.lower()
-    keywords = ["visa sponsorship", "h1b", "work visa", "sponsorship"]
+    return jobs
 
-    return "Mentioned" if any(k in text for k in keywords) else "Not mentioned"
-
-
-# ================== POSTING ================== #
+# ================= POSTING ================= #
 
 async def post_job(job):
-    desc = job.get("summary", "")
-
     msg = (
         f"📌 *{job['title']}*\n\n"
         f"🏢 {job['company']}\n"
         f"📍 {job['location']}\n"
-        f"🌐 Source: {job['source']}\n\n"
-        f"💼 Experience: {extract_experience(desc) or 'Not specified'}\n"
-        f"💰 Salary: {extract_salary(desc) or 'Not disclosed'}\n"
-        f"🇺🇸 H1B Sponsorship: {detect_h1b(desc)}\n\n"
-        f"📝 {desc[:700]}\n\n"
+        f"🌐 Source: {job['source']}\n"
+        f"⏱ Posted: {job['posted']}\n\n"
+        f"📝 {job['summary'][:700]}\n\n"
         f"🔗 [Apply Here]({job['url']})"
     )
 
@@ -122,96 +146,21 @@ async def post_job(job):
         disable_web_page_preview=True
     )
 
+# ================= MAIN JOB LOOP ================= #
 
-# ================== FETCHERS ================== #
-
-def fetch_google_jobs():
-    url = "https://serpapi.com/search.json"
-    params = {
-        "engine": "google_jobs",
-        "q": "Data Analyst jobs USA",
-        "hl": "en",
-        "api_key": SERPAPI_KEY,
-        "tbs": "qdr:d"  # last 24 hours from Google
-    }
-
-    res = requests.get(url, params=params, timeout=20).json()
-    jobs = []
-
-    cutoff = datetime.utcnow() - timedelta(hours=5)
-
-    for j in res.get("jobs_results", []):
-        posted_at = j.get("detected_extensions", {}).get("posted_at")
-        if not posted_at:
-            continue
-
-        # Examples: "3 hours ago", "1 day ago"
-        if "hour" in posted_at:
-            hours = int(posted_at.split()[0])
-            if hours > 5:
-                continue
-        elif "minute" in posted_at:
-            pass  # always within 5 hours
-        else:
-            continue  # days/weeks → skip
-
-        apply = j.get("apply_options", [])
-        if not apply:
-            continue
-
-        jobs.append({
-            "id": j.get("job_id") or j["title"] + j["company_name"],
-            "title": j["title"],
-            "company": j["company_name"],
-            "location": j.get("location", "United States"),
-            "summary": j.get("description", ""),
-            "url": apply[0].get("link"),
-            "source": j.get("via", "Google Jobs")
-        })
-
-    return jobs
-def fetch_adzuna_jobs():
-    url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
-    params = {
-        "app_id": ADZUNA_APP_ID,
-        "app_key": ADZUNA_APP_KEY,
-        "what": "data analyst",
-        "where": "United States",
-        "results_per_page": 20,
-        "sort_by": "date"
-    }
-
-    res = requests.get(url, params=params, timeout=20).json()
-    jobs = []
-
-    cutoff = datetime.utcnow() - timedelta(hours=5)
-
-    for j in res.get("results", []):
-        created = datetime.fromisoformat(j["created"].replace("Z", ""))
-        if created < cutoff:
-            continue  # ❌ older than 5 hours
-
-        jobs.append({
-            "id": str(j["id"]),
-            "title": j["title"],
-            "company": j["company"]["display_name"],
-            "location": j["location"]["display_name"],
-            "summary": j.get("description", ""),
-            "url": j["redirect_url"],
-            "source": "Adzuna"
-        })
-
-    return jobs
-
-
-# ================== MAIN LOGIC ================== #
-
-async def check_and_post_new_jobs():
+async def check_and_post_jobs():
     print("🔍 Checking for new jobs...")
     posted = load_posted_jobs()
+    companies = load_companies()
 
-    jobs = fetch_adzuna_jobs() + fetch_google_jobs()
-    new_jobs = [j for j in jobs if j["id"] not in posted]
+    new_jobs = []
+
+    for c in companies:
+        for site in c["sites"]:
+            jobs = fetch_company_jobs(c["company"], site)
+            for job in jobs:
+                if job["id"] not in posted:
+                    new_jobs.append(job)
 
     if not new_jobs:
         print("⏸ No new jobs")
@@ -220,17 +169,21 @@ async def check_and_post_new_jobs():
     for job in new_jobs:
         await post_job(job)
         save_posted_job(job["id"])
-        print(f"✅ Posted: {job['title']}")
+        print(f"✅ Posted: {job['title']} ({job['company']})")
 
+# ================= SCHEDULER ================= #
 
 async def main():
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_and_post_new_jobs, "interval", minutes=CHECK_INTERVAL_MINUTES)
+    scheduler.add_job(
+        check_and_post_jobs,
+        "interval",
+        minutes=CHECK_INTERVAL_MINUTES
+    )
     scheduler.start()
 
-    print(f"🤖 Bot running (checks every {CHECK_INTERVAL_MINUTES} min)")
+    print(f"🤖 Bot running (checks every {CHECK_INTERVAL_MINUTES} minutes)")
     await asyncio.Event().wait()
-
 
 asyncio.run(main())
 
