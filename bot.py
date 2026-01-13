@@ -53,15 +53,52 @@ def save_posted_job(job_id):
 
 def load_companies():
     companies = []
+
     with open(CSV_FILE, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+
+        required_company_col = "Company Name"
+        url_columns = [
+            "Primary Careers URL",
+            "Workday URL",
+            "Greenhouse URL",
+            "Lever URL",
+            "Jobs Page Fallback",
+        ]
+
+        if required_company_col not in reader.fieldnames:
+            raise RuntimeError(
+                f"❌ 'Company Name' column not found. Found: {reader.fieldnames}"
+            )
+
         for row in reader:
-            sites = [s.strip() for s in row["career_sites"].split("|") if s.strip()]
+            company = row[required_company_col].strip()
+            if not company:
+                continue
+
+            sites = []
+            for col in url_columns:
+                val = row.get(col)
+                if not val:
+                    continue
+
+                # split in case multiple URLs are in one cell
+                for part in str(val).split("|"):
+                    part = part.strip()
+                    if part:
+                        # remove protocol if present
+                        part = part.replace("https://", "").replace("http://", "")
+                        sites.append(part)
+
+            if not sites:
+                continue
+
             companies.append({
-                "company": row["company"],
+                "company": company,
                 "sites": sites
             })
-    print(f"✅ Loaded {len(companies)} companies from CSV")
+
+    print(f"✅ Loaded {len(companies)} companies with ATS fallbacks")
     return companies
 
 def is_within_24_hours(posted_at: str) -> bool:
