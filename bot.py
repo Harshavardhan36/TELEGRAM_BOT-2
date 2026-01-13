@@ -125,6 +125,51 @@ async def post_job(job):
 
 # ================== FETCHERS ================== #
 
+def fetch_google_jobs():
+    url = "https://serpapi.com/search.json"
+    params = {
+        "engine": "google_jobs",
+        "q": "Data Analyst jobs USA",
+        "hl": "en",
+        "api_key": SERPAPI_KEY,
+        "tbs": "qdr:d"  # last 24 hours from Google
+    }
+
+    res = requests.get(url, params=params, timeout=20).json()
+    jobs = []
+
+    cutoff = datetime.utcnow() - timedelta(hours=5)
+
+    for j in res.get("jobs_results", []):
+        posted_at = j.get("detected_extensions", {}).get("posted_at")
+        if not posted_at:
+            continue
+
+        # Examples: "3 hours ago", "1 day ago"
+        if "hour" in posted_at:
+            hours = int(posted_at.split()[0])
+            if hours > 5:
+                continue
+        elif "minute" in posted_at:
+            pass  # always within 5 hours
+        else:
+            continue  # days/weeks → skip
+
+        apply = j.get("apply_options", [])
+        if not apply:
+            continue
+
+        jobs.append({
+            "id": j.get("job_id") or j["title"] + j["company_name"],
+            "title": j["title"],
+            "company": j["company_name"],
+            "location": j.get("location", "United States"),
+            "summary": j.get("description", ""),
+            "url": apply[0].get("link"),
+            "source": j.get("via", "Google Jobs")
+        })
+
+    return jobs
 def fetch_adzuna_jobs():
     url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
     params = {
@@ -139,12 +184,12 @@ def fetch_adzuna_jobs():
     res = requests.get(url, params=params, timeout=20).json()
     jobs = []
 
-    last_24h = datetime.utcnow() - timedelta(hours=24)
+    cutoff = datetime.utcnow() - timedelta(hours=5)
 
     for j in res.get("results", []):
         created = datetime.fromisoformat(j["created"].replace("Z", ""))
-        if created < last_24h:
-            continue  # ❌ skip old jobs
+        if created < cutoff:
+            continue  # ❌ older than 5 hours
 
         jobs.append({
             "id": str(j["id"]),
@@ -154,37 +199,6 @@ def fetch_adzuna_jobs():
             "summary": j.get("description", ""),
             "url": j["redirect_url"],
             "source": "Adzuna"
-        })
-
-    return jobs
-
-
-def fetch_google_jobs():
-    url = "https://serpapi.com/search.json"
-    params = {
-        "engine": "google_jobs",
-        "q": "Data Analyst jobs USA",
-        "hl": "en",
-        "api_key": SERPAPI_KEY,
-        "tbs": "qdr:d"  # 🔥 last 24 hours
-    }
-
-    res = requests.get(url, params=params, timeout=20).json()
-    jobs = []
-
-    for j in res.get("jobs_results", []):
-        apply = j.get("apply_options", [])
-        if not apply:
-            continue
-
-        jobs.append({
-            "id": j.get("job_id") or j["title"] + j["company_name"],
-            "title": j["title"],
-            "company": j["company_name"],
-            "location": j.get("location", "United States"),
-            "summary": j.get("description", ""),
-            "url": apply[0].get("link"),
-            "source": j.get("via", "Google Jobs")
         })
 
     return jobs
