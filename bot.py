@@ -139,7 +139,13 @@ def fetch_adzuna_jobs():
     res = requests.get(url, params=params, timeout=20).json()
     jobs = []
 
+    last_24h = datetime.utcnow() - timedelta(hours=24)
+
     for j in res.get("results", []):
+        created = datetime.fromisoformat(j["created"].replace("Z", ""))
+        if created < last_24h:
+            continue  # ❌ skip old jobs
+
         jobs.append({
             "id": str(j["id"]),
             "title": j["title"],
@@ -159,7 +165,8 @@ def fetch_google_jobs():
         "engine": "google_jobs",
         "q": "Data Analyst jobs USA",
         "hl": "en",
-        "api_key": SERPAPI_KEY
+        "api_key": SERPAPI_KEY,
+        "tbs": "qdr:d"  # 🔥 last 24 hours
     }
 
     res = requests.get(url, params=params, timeout=20).json()
