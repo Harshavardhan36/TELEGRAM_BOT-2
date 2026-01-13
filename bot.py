@@ -207,20 +207,7 @@ async def check_and_post_jobs():
         await post_job(job)
         save_posted_job(job["id"])
         print(f"✅ Posted: {job['title']} ({job['company']})")
+if __name__ == "__main__":
+    asyncio.run(check_and_post_jobs())
 
-# ================= SCHEDULER ================= #
-
-async def main():
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        check_and_post_jobs,
-        "interval",
-        minutes=CHECK_INTERVAL_MINUTES
-    )
-    scheduler.start()
-
-    print(f"🤖 Bot running (checks every {CHECK_INTERVAL_MINUTES} minutes)")
-    await asyncio.Event().wait()
-
-asyncio.run(main())
 
